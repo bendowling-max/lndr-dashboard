@@ -77,7 +77,7 @@ def get_bq():
     if "gcp_service_account" in st.secrets:
         creds = service_account.Credentials.from_service_account_info(
             st.secrets["gcp_service_account"],
-            scopes=["https://www.googleapis.com/auth/bigquery.readonly"],
+            scopes=["https://www.googleapis.com/auth/bigquery"],
         )
         return bigquery.Client(credentials=creds, project=BQ_PROJECT)
     else:
