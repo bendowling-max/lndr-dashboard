@@ -61,6 +61,10 @@ COLORS = {
 MONTH_NAMES = [date(2000, m, 1).strftime("%B") for m in range(1, 13)]
 MONTH_SHORT  = [date(2000, m, 1).strftime("%b")  for m in range(1, 13)]
 
+# Australian FY: Jul 1 – Jun 30.  FY year = end year (FY2026 = Jul 2025 – Jun 2026)
+FY_MONTH_ORDER = [7, 8, 9, 10, 11, 12, 1, 2, 3, 4, 5, 6]
+FY_MONTH_SHORT = [MONTH_SHORT[m - 1] for m in FY_MONTH_ORDER]
+
 # ── Page config ───────────────────────────────────────────────────────────────
 
 st.set_page_config(
@@ -210,16 +214,15 @@ def load_monthly_data(year: int, month: int) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=1800, show_spinner="Querying BigQuery...")
-def load_annual_data(year: int) -> pd.DataFrame:
+def load_annual_data(fy_year: int) -> pd.DataFrame:
     """
-    Monthly revenue by (month_num, region, product_type) for year AND prior year.
-    Columns: day, month_num, year_label, region, product_type, revenue_gbp
+    Monthly revenue for FY fy_year (Jul fy_year-1 – Jun fy_year) AND prior FY.
+    Columns: day, month_num, year_label, region, product_type, customer_type, revenue_gbp
     """
-    prior = year - 1
-    cur_s = date(year,  1,  1)
-    cur_e = date(year,  12, 31)
-    pri_s = date(prior, 1,  1)
-    pri_e = date(prior, 12, 31)
+    cur_s = date(fy_year - 1, 7,  1)
+    cur_e = date(fy_year,     6, 30)
+    pri_s = date(fy_year - 2, 7,  1)
+    pri_e = date(fy_year - 1, 6, 30)
 
     utc_ranges = [_utc_buffered(cur_s, cur_e), _utc_buffered(pri_s, pri_e)]
     tz_ranges  = [(cur_s, cur_e), (pri_s, pri_e)]
@@ -227,6 +230,8 @@ def load_annual_data(year: int) -> pd.DataFrame:
     df = get_bq().query(_build_query(utc_ranges, tz_ranges)).to_dataframe()
     df["month_num"]  = df["month_num"].astype(int)
     df["year_label"] = df["year_label"].astype(int)
+    # Assign FY year: months Jul-Dec belong to next FY year
+    df["fy_year"] = df["year_label"] + (df["month_num"] >= 7).astype(int)
     return df
 
 
@@ -255,13 +260,14 @@ def load_forecast(year: int, month: int) -> float:
 
 
 @st.cache_data(ttl=1800)
-def load_annual_forecast(year: int) -> dict:
-    """Returns {month: forecast_gbp} for all months with a forecast in year."""
+def load_annual_forecast(fy_year: int) -> dict:
+    """Returns {month: forecast_gbp} for FY fy_year (Jul–Jun). Keys are calendar month numbers."""
     bq = get_bq()
     sql = f"""
     SELECT forecast_month, SUM(total_gbp) AS total
     FROM `lndr-brain.reference.monthly_forecast`
-    WHERE forecast_year = {year}
+    WHERE (forecast_year = {fy_year - 1} AND forecast_month >= 7)
+       OR (forecast_year = {fy_year}     AND forecast_month <= 6)
     GROUP BY forecast_month
     ORDER BY forecast_month
     """
@@ -347,16 +353,21 @@ with st.sidebar:
 
     view = st.radio("View", ["Monthly", "12-Month"], horizontal=True)
 
-    today  = date.today()
-    year   = st.selectbox("Year", list(range(today.year, today.year - 4, -1)))
-    prior  = year - 1
+    today      = date.today()
+    current_fy = today.year if today.month < 7 else today.year + 1
+    fy_options = list(range(current_fy, current_fy - 5, -1))
+    year  = st.selectbox("Year", fy_options, format_func=lambda y: f"FY{y}")
+    prior = year - 1
 
     if view == "Monthly":
-        default_m = (today.month - 1) if year == today.year else 0
+        default_m  = (today.month - 1) if year == current_fy else 0
         month_name = st.selectbox("Month", MONTH_NAMES, index=default_m)
-        month = MONTH_NAMES.index(month_name) + 1
+        month      = MONTH_NAMES.index(month_name) + 1
+        # Calendar year for this month within the selected FY
+        cal_year   = year if month < 7 else year - 1
+        cal_prior  = cal_year - 1
     else:
-        month = None
+        month = cal_year = cal_prior = None
 
     st.divider()
 
@@ -380,7 +391,7 @@ with st.sidebar:
 # ── Load & filter data ────────────────────────────────────────────────────────
 
 if view == "Monthly":
-    raw = load_monthly_data(year, month)
+    raw = load_monthly_data(cal_year, month)
 else:
     raw = load_annual_data(year)
 
@@ -390,13 +401,20 @@ df = raw[
     raw["customer_type"].isin(cust_types)
 ].copy()
 
-cur_df_all = df[df["year_label"] == year]
-pri_df_all = df[df["year_label"] == prior]
+if view == "Monthly":
+    cur_df_all = df[df["year_label"] == cal_year]
+    pri_df_all = df[df["year_label"] == cal_prior]
+else:
+    cur_df_all = df[df["fy_year"] == year]
+    pri_df_all = df[df["fy_year"] == prior]
 
 
 # ── MONTHLY VIEW ─────────────────────────────────────────────────────────────
 
 if view == "Monthly":
+    # Use calendar year throughout monthly view
+    year, prior = cal_year, cal_prior
+
     days_in_month  = calendar.monthrange(year, month)[1]
     is_current     = (year == today.year and month == today.month)
     is_future      = date(year, month, 1) > date(today.year, today.month, 1)
@@ -674,47 +692,48 @@ else:
     yoy_pct   = (cur_total - pri_total) / pri_total * 100 if pri_total else 0
 
     # ── Title + KPI cards ─────────────────────────────────────────────────────
-    st.title(f"Global Gross Revenue — {year} vs {prior}")
+    st.title(f"Global Gross Revenue — FY{year} vs FY{prior}")
 
     k1, k2, k3 = st.columns(3)
-    k1.metric(f"{year} Revenue (YTD)", gbp(cur_total),
+    k1.metric(f"FY{year} Revenue (FYTD)", gbp(cur_total),
               delta=pct(yoy_pct) + " YoY", delta_color="normal")
-    k2.metric(f"{prior} Full Year", gbp(pri_total))
+    k2.metric(f"FY{prior} Full Year", gbp(pri_total))
     months_with_data = int(cur_by_month.shape[0])
     k3.metric("Avg monthly revenue", gbp(cur_total / months_with_data) if months_with_data else "—")
 
     # ── Main line chart ───────────────────────────────────────────────────────
     fig = go.Figure()
 
-    pri_x = [MONTH_SHORT[int(m) - 1] for m in sorted(pri_by_month.index)]
-    pri_y = [float(pri_by_month[m]) for m in sorted(pri_by_month.index)]
+    # Plot in FY order (Jul→Jun)
+    pri_x = FY_MONTH_SHORT
+    pri_y = [float(pri_by_month.get(m, 0)) for m in FY_MONTH_ORDER]
     fig.add_trace(go.Scatter(
         x=pri_x, y=pri_y,
         mode="lines+markers",
-        name=str(prior),
+        name=f"FY{prior}",
         line=dict(color=COLORS["pri"], dash="dash", width=1.5),
         marker=dict(size=6),
         customdata=[gbp(v) for v in pri_y],
         hovertemplate="%{customdata}<extra></extra>",
     ))
 
-    cur_x = [MONTH_SHORT[int(m) - 1] for m in sorted(cur_by_month.index)]
-    cur_y = [float(cur_by_month[m]) for m in sorted(cur_by_month.index)]
+    cur_x = FY_MONTH_SHORT
+    cur_y = [float(cur_by_month.get(m, 0)) for m in FY_MONTH_ORDER]
     fig.add_trace(go.Scatter(
         x=cur_x, y=cur_y,
         mode="lines+markers",
-        name=str(year),
+        name=f"FY{year}",
         line=dict(color=COLORS["cur"], width=2),
         marker=dict(size=6),
         customdata=[gbp(v) for v in cur_y],
         hovertemplate="%{customdata}<extra></extra>",
     ))
 
-    # Forecast line
+    # Forecast line (FY order)
     annual_fc = load_annual_forecast(year)
     if annual_fc:
-        fc_x = [MONTH_SHORT[m - 1] for m in sorted(annual_fc)]
-        fc_y = [annual_fc[m] for m in sorted(annual_fc)]
+        fc_x = [MONTH_SHORT[m - 1] for m in FY_MONTH_ORDER if m in annual_fc]
+        fc_y = [annual_fc[m] for m in FY_MONTH_ORDER if m in annual_fc]
         fig.add_trace(go.Scatter(
             x=fc_x, y=fc_y,
             mode="lines+markers",
@@ -725,16 +744,17 @@ else:
             hovertemplate="%{customdata}<extra></extra>",
         ))
 
-    # Promo indicators (small coloured triangles below x-axis)
+    # Promo indicators — months Jul-Dec come from (year-1) calendar, Jan-Jun from year
     if show_promos:
-        promo_months_cur = load_promo_months(year)
-        promo_months_pri = load_promo_months(prior)
-        for m in range(1, 13):
-            has_cur = m in promo_months_cur
-            has_pri = m in promo_months_pri
+        promo_cur_prev = load_promo_months(year - 1)   # Jul-Dec part of this FY
+        promo_cur_curr = load_promo_months(year)        # Jan-Jun part of this FY
+        promo_pri_prev = load_promo_months(prior - 1)
+        promo_pri_curr = load_promo_months(prior)
+        for m in FY_MONTH_ORDER:
+            has_cur = m in (promo_cur_prev if m >= 7 else promo_cur_curr)
+            has_pri = m in (promo_pri_prev if m >= 7 else promo_pri_curr)
             if has_cur or has_pri:
                 color = COLORS["cur"] if has_cur else COLORS["pri"]
-                # Subtle annotation tag below chart
                 fig.add_annotation(
                     x=MONTH_SHORT[m - 1],
                     y=0, yref="paper",
@@ -746,10 +766,10 @@ else:
                 )
 
     fig.update_layout(**_chart_layout(
-        f"Monthly Revenue — {year} vs {prior}",
+        f"Monthly Revenue — FY{year} vs FY{prior}",
         xaxis=dict(
             categoryorder="array",
-            categoryarray=MONTH_SHORT,
+            categoryarray=FY_MONTH_SHORT,
             gridcolor="#2a2a3e",
         ),
     ))
