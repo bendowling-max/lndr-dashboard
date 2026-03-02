@@ -86,36 +86,73 @@ def get_bq():
 
 # ── SQL helpers ───────────────────────────────────────────────────────────────
 
-_BASE_JOINS = """
-  FROM `lndr-brain.shopify_raw.orders` o
-  JOIN `lndr-brain.shopify_raw.order_line_items` li
-    ON o.order_id = li.order_id AND o.store = li.store
-  JOIN `lndr-brain.reference.exchange_rates` fx
-    ON fx.date = DATE(o.created_at)
-  LEFT JOIN `lndr-brain.shopify_raw.products` p
-    ON li.product_id = p.product_id AND li.store = p.store
-  WHERE o.financial_status != 'voided'
-    AND NOT REGEXP_CONTAINS(LOWER(IFNULL(o.tags, '')), r'swap')
-    AND NOT (o.source_name = 'shopify_draft_order' AND o.total_price = 0)
-"""
+from datetime import timedelta
 
-_REVENUE_EXPR = """ROUND(SUM(
-  (li.price * li.quantity - COALESCE(li.total_discount, 0)) *
-  CASE o.store
-    WHEN 'AU'  THEN 1.0 / fx.aud
-    WHEN 'US'  THEN 1.0 / fx.usd
-    WHEN 'ROW' THEN 1.0
-  END
-))"""
+def _build_query(utc_ranges: list, tz_ranges: list) -> str:
+    """
+    Build a CTE-based query with two stages:
+    1. UTC pre-filter on DATE(o.created_at) — enables BigQuery partition pruning
+    2. Timezone-accurate sale_date filter in the outer query
+
+    utc_ranges: [(start, end), ...] — UTC date ranges (with 2-day buffer)
+    tz_ranges:  [(start, end), ...] — timezone-accurate date ranges for final filter
+    """
+    utc_clauses = " OR ".join(
+        f"DATE(o.created_at) BETWEEN '{s}' AND '{e}'" for s, e in utc_ranges
+    )
+    tz_clauses = " OR ".join(f"""(
+    (store = 'AU'  AND sale_date BETWEEN '{s}' AND '{e}')
+ OR (store = 'US'  AND sale_date BETWEEN '{s}' AND '{e}')
+ OR (store = 'ROW' AND sale_date BETWEEN '{s}' AND '{e}')
+    )""" for s, e in tz_ranges)
+
+    return f"""
+    WITH base AS (
+      SELECT
+        o.store,
+        o.shipping_country,
+        CASE o.store
+          WHEN 'AU'  THEN DATE(DATETIME(o.created_at, 'Australia/Sydney'))
+          WHEN 'US'  THEN DATE(DATETIME(o.created_at, 'America/New_York'))
+          WHEN 'ROW' THEN DATE(DATETIME(o.created_at, 'Europe/London'))
+        END AS sale_date,
+        {REGION_CASE} AS region,
+        COALESCE(NULLIF(TRIM(p.product_type), ''), 'Other') AS product_type,
+        (li.price * li.quantity - COALESCE(li.total_discount, 0)) *
+        CASE o.store
+          WHEN 'AU'  THEN 1.0 / fx.aud
+          WHEN 'US'  THEN 1.0 / fx.usd
+          WHEN 'ROW' THEN 1.0
+        END AS line_rev_gbp
+      FROM `lndr-brain.shopify_raw.orders` o
+      JOIN `lndr-brain.shopify_raw.order_line_items` li
+        ON o.order_id = li.order_id AND o.store = li.store
+      JOIN `lndr-brain.reference.exchange_rates` fx
+        ON fx.date = DATE(o.created_at)
+      LEFT JOIN `lndr-brain.shopify_raw.products` p
+        ON li.product_id = p.product_id AND li.store = p.store
+      WHERE o.financial_status != 'voided'
+        AND NOT REGEXP_CONTAINS(LOWER(IFNULL(o.tags, '')), r'swap')
+        AND NOT (o.source_name = 'shopify_draft_order' AND o.total_price = 0)
+        AND ({utc_clauses})
+    )
+    SELECT
+      EXTRACT(DAY   FROM sale_date) AS day,
+      EXTRACT(MONTH FROM sale_date) AS month_num,
+      EXTRACT(YEAR  FROM sale_date) AS year_label,
+      region,
+      product_type,
+      ROUND(SUM(line_rev_gbp)) AS revenue_gbp
+    FROM base
+    WHERE {tz_clauses}
+    GROUP BY day, month_num, year_label, region, product_type
+    ORDER BY year_label, month_num, day
+    """
 
 
-def _store_date_filter(start: date, end: date) -> str:
-    """WHERE fragment: filter to a date range in each store's local timezone."""
-    return f"""(
-    (o.store = 'AU'  AND DATE(DATETIME(o.created_at, 'Australia/Sydney'))  BETWEEN '{start}' AND '{end}')
- OR (o.store = 'US'  AND DATE(DATETIME(o.created_at, 'America/New_York'))  BETWEEN '{start}' AND '{end}')
- OR (o.store = 'ROW' AND DATE(DATETIME(o.created_at, 'Europe/London'))     BETWEEN '{start}' AND '{end}')
-    )"""
+def _utc_buffered(d_start: date, d_end: date) -> tuple:
+    """Add 2-day buffer for UTC pre-filter (accounts for timezone offsets up to UTC+14)."""
+    return (d_start - timedelta(days=2), d_end + timedelta(days=1))
 
 
 # ── Data loaders (cached) ─────────────────────────────────────────────────────
@@ -124,28 +161,18 @@ def _store_date_filter(start: date, end: date) -> str:
 def load_monthly_data(year: int, month: int) -> pd.DataFrame:
     """
     Daily revenue by (day, region, product_type) for year/month AND prior year/month.
-    Columns: day (int), year_label (int), region, product_type, revenue_gbp
+    Columns: day, month_num, year_label, region, product_type, revenue_gbp
     """
-    bq = get_bq()
     prior = year - 1
-    cur_s  = date(year,  month, 1)
-    cur_e  = date(year,  month, calendar.monthrange(year,  month)[1])
-    pri_s  = date(prior, month, 1)
-    pri_e  = date(prior, month, calendar.monthrange(prior, month)[1])
+    cur_s = date(year,  month, 1)
+    cur_e = date(year,  month, calendar.monthrange(year,  month)[1])
+    pri_s = date(prior, month, 1)
+    pri_e = date(prior, month, calendar.monthrange(prior, month)[1])
 
-    sql = f"""
-    SELECT
-      EXTRACT(DAY  FROM ({SALE_DATE_CASE})) AS day,
-      EXTRACT(YEAR FROM ({SALE_DATE_CASE})) AS year_label,
-      {REGION_CASE} AS region,
-      COALESCE(NULLIF(TRIM(p.product_type), ''), 'Other') AS product_type,
-      {_REVENUE_EXPR} AS revenue_gbp
-    {_BASE_JOINS}
-      AND ({_store_date_filter(cur_s, cur_e)} OR {_store_date_filter(pri_s, pri_e)})
-    GROUP BY day, year_label, region, product_type
-    ORDER BY year_label, day
-    """
-    df = bq.query(sql).to_dataframe()
+    utc_ranges = [_utc_buffered(cur_s, cur_e), _utc_buffered(pri_s, pri_e)]
+    tz_ranges  = [(cur_s, cur_e), (pri_s, pri_e)]
+
+    df = get_bq().query(_build_query(utc_ranges, tz_ranges)).to_dataframe()
     df["day"]        = df["day"].astype(int)
     df["year_label"] = df["year_label"].astype(int)
     return df
@@ -155,27 +182,18 @@ def load_monthly_data(year: int, month: int) -> pd.DataFrame:
 def load_annual_data(year: int) -> pd.DataFrame:
     """
     Monthly revenue by (month_num, region, product_type) for year AND prior year.
-    Columns: month_num (int), year_label (int), region, product_type, revenue_gbp
+    Columns: day, month_num, year_label, region, product_type, revenue_gbp
     """
-    bq = get_bq()
     prior = year - 1
-    # One continuous range covering both full years
-    start = date(prior, 1, 1)
-    end   = date(year, 12, 31)
+    cur_s = date(year,  1,  1)
+    cur_e = date(year,  12, 31)
+    pri_s = date(prior, 1,  1)
+    pri_e = date(prior, 12, 31)
 
-    sql = f"""
-    SELECT
-      EXTRACT(MONTH FROM ({SALE_DATE_CASE})) AS month_num,
-      EXTRACT(YEAR  FROM ({SALE_DATE_CASE})) AS year_label,
-      {REGION_CASE} AS region,
-      COALESCE(NULLIF(TRIM(p.product_type), ''), 'Other') AS product_type,
-      {_REVENUE_EXPR} AS revenue_gbp
-    {_BASE_JOINS}
-      AND ({_store_date_filter(start, end)})
-    GROUP BY month_num, year_label, region, product_type
-    ORDER BY year_label, month_num
-    """
-    df = bq.query(sql).to_dataframe()
+    utc_ranges = [_utc_buffered(cur_s, cur_e), _utc_buffered(pri_s, pri_e)]
+    tz_ranges  = [(cur_s, cur_e), (pri_s, pri_e)]
+
+    df = get_bq().query(_build_query(utc_ranges, tz_ranges)).to_dataframe()
     df["month_num"]  = df["month_num"].astype(int)
     df["year_label"] = df["year_label"].astype(int)
     return df
