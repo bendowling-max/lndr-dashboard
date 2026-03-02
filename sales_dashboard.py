@@ -99,12 +99,10 @@ from datetime import timedelta
 
 def _build_query(utc_ranges: list, tz_ranges: list) -> str:
     """
-    Build a CTE-based query with two stages:
-    1. UTC pre-filter on DATE(o.created_at) — enables BigQuery partition pruning
-    2. Timezone-accurate sale_date filter in the outer query
-
-    utc_ranges: [(start, end), ...] — UTC date ranges (with 2-day buffer)
-    tz_ranges:  [(start, end), ...] — timezone-accurate date ranges for final filter
+    Build a CTE-based query using o.total_price (matches weekly email exactly),
+    proportionally allocated to line items for product-type filtering.
+    Stage 1: UTC pre-filter for partition pruning.
+    Stage 2: Timezone-accurate sale_date filter.
     """
     utc_clauses = " OR ".join(
         f"DATE(o.created_at) BETWEEN '{s}' AND '{e}'" for s, e in utc_ranges
@@ -116,7 +114,7 @@ def _build_query(utc_ranges: list, tz_ranges: list) -> str:
     )""" for s, e in tz_ranges)
 
     return f"""
-    WITH base AS (
+    WITH pre AS (
       SELECT
         o.store,
         o.shipping_country,
@@ -127,12 +125,15 @@ def _build_query(utc_ranges: list, tz_ranges: list) -> str:
         END AS sale_date,
         {REGION_CASE} AS region,
         COALESCE(NULLIF(TRIM(p.product_type), ''), 'Other') AS product_type,
-        (li.price * li.quantity - COALESCE(li.total_discount, 0)) *
-        CASE o.store
+        -- Order total in GBP (same as weekly email)
+        o.total_price * CASE o.store
           WHEN 'AU'  THEN 1.0 / fx.aud
           WHEN 'US'  THEN 1.0 / fx.usd
           WHEN 'ROW' THEN 1.0
-        END AS line_rev_gbp
+        END AS order_rev_gbp,
+        -- Proportional allocation by line-item gross
+        li.price * li.quantity AS line_gross,
+        SUM(li.price * li.quantity) OVER (PARTITION BY o.order_id, o.store) AS order_gross
       FROM `lndr-brain.shopify_raw.orders` o
       JOIN `lndr-brain.shopify_raw.order_line_items` li
         ON o.order_id = li.order_id AND o.store = li.store
@@ -151,8 +152,8 @@ def _build_query(utc_ranges: list, tz_ranges: list) -> str:
       EXTRACT(YEAR  FROM sale_date) AS year_label,
       region,
       product_type,
-      ROUND(SUM(line_rev_gbp)) AS revenue_gbp
-    FROM base
+      ROUND(SUM(order_rev_gbp * SAFE_DIVIDE(line_gross, order_gross))) AS revenue_gbp
+    FROM pre
     WHERE {tz_clauses}
     GROUP BY day, month_num, year_label, region, product_type
     ORDER BY year_label, month_num, day
@@ -461,14 +462,11 @@ if view == "Monthly":
 
     # Promo annotations
     if show_promos:
-        all_y_vals = pri_y + cur_y
-        y_step = (max(all_y_vals) - min(all_y_vals)) * 0.15 if all_y_vals else 5000
-
         for i, (day, label) in enumerate(load_promos_for_month(prior, month)):
-            idx = day - 1
-            if 0 <= idx < len(pri_y) and pri_y[idx] > 0:
+            y_val = float(pri_by_day.get(day, 0))
+            if y_val > 0:
                 fig.add_annotation(
-                    x=day, y=pri_y[idx],
+                    x=day, y=y_val,
                     text=label, showarrow=True,
                     ax=0, ay=-(35 + 18 * (i % 3)),
                     font=dict(color="#888", size=9),
@@ -477,10 +475,10 @@ if view == "Monthly":
                 )
 
         for i, (day, label) in enumerate(load_promos_for_month(year, month)):
-            idx = day - 1
-            if 0 <= idx < len(cur_y) and cur_y[idx] > 0:
+            y_val = float(cur_by_day.get(day, 0))
+            if y_val > 0:
                 fig.add_annotation(
-                    x=day, y=cur_y[idx],
+                    x=day, y=y_val,
                     text=label, showarrow=True,
                     ax=0, ay=-(35 + 18 * (i % 3)),
                     font=dict(color=COLORS["cur"], size=9),
@@ -505,12 +503,17 @@ if view == "Monthly":
     with col_l:
         st.subheader("By Region")
         reg_cur = cur_df_all.groupby("region")["revenue_gbp"].sum().reset_index()
-        reg_pri = pri_df_all.groupby("region")["revenue_gbp"].sum().reset_index()
         # Only include days up to last_data_day for prior year comparability
         reg_pri_comp = (
             pri_df_all[pri_df_all["day"] <= last_data_day]
             .groupby("region")["revenue_gbp"].sum().reset_index()
         )
+        reg_pri_map = reg_pri_comp.set_index("region")["revenue_gbp"]
+        reg_pct_text = [
+            f"{(r - reg_pri_map.get(rgn, 0)) / reg_pri_map.get(rgn, 1) * 100:+.0f}%"
+            if reg_pri_map.get(rgn, 0) > 0 else ""
+            for rgn, r in zip(reg_cur["region"], reg_cur["revenue_gbp"])
+        ]
         fig_r = go.Figure()
         fig_r.add_trace(go.Bar(
             x=reg_pri_comp["region"], y=reg_pri_comp["revenue_gbp"],
@@ -519,10 +522,12 @@ if view == "Monthly":
         fig_r.add_trace(go.Bar(
             x=reg_cur["region"], y=reg_cur["revenue_gbp"],
             name=str(year), marker_color=COLORS["cur"],
+            text=reg_pct_text, textposition="outside",
+            textfont=dict(size=11),
         ))
         fig_r.update_layout(
             barmode="group", yaxis=dict(tickformat="£,.0f", gridcolor="#2a2a3e"),
-            height=300, margin=dict(t=10, b=30),
+            height=320, margin=dict(t=10, b=30),
             legend=dict(orientation="h", yanchor="bottom", y=1.02),
             plot_bgcolor="#0f1117", paper_bgcolor="#0f1117",
             font=dict(color="#ccc"),
@@ -537,6 +542,11 @@ if view == "Monthly":
             pri_df_all[pri_df_all["day"] <= last_data_day]
             .groupby("product_type")["revenue_gbp"].sum()
         )
+        cat_pct_text = [
+            f"{(float(cat_cur.get(pt, 0)) - float(cat_pri_ser.get(pt, 0))) / float(cat_pri_ser.get(pt, 1)) * 100:+.0f}%"
+            if float(cat_pri_ser.get(pt, 0)) > 0 else ""
+            for pt in cat_cur.index[::-1]
+        ]
         fig_c = go.Figure()
         fig_c.add_trace(go.Bar(
             y=cat_cur.index[::-1],
@@ -549,10 +559,12 @@ if view == "Monthly":
             x=cat_cur.values[::-1],
             name=str(year), marker_color=COLORS["cur"],
             orientation="h",
+            text=cat_pct_text, textposition="outside",
+            textfont=dict(size=11),
         ))
         fig_c.update_layout(
             barmode="group", xaxis=dict(tickformat="£,.0f", gridcolor="#2a2a3e"),
-            height=300, margin=dict(t=10, b=30),
+            height=320, margin=dict(t=10, b=30),
             legend=dict(orientation="h", yanchor="bottom", y=1.02),
             plot_bgcolor="#0f1117", paper_bgcolor="#0f1117",
             font=dict(color="#ccc"),
@@ -640,6 +652,12 @@ else:
         st.subheader("By Region")
         reg_cur = cur_df_all.groupby("region")["revenue_gbp"].sum().reset_index()
         reg_pri = pri_df_all.groupby("region")["revenue_gbp"].sum().reset_index()
+        reg_pri_map = reg_pri.set_index("region")["revenue_gbp"]
+        reg_pct_text = [
+            f"{(r - reg_pri_map.get(rgn, 0)) / reg_pri_map.get(rgn, 1) * 100:+.0f}%"
+            if reg_pri_map.get(rgn, 0) > 0 else ""
+            for rgn, r in zip(reg_cur["region"], reg_cur["revenue_gbp"])
+        ]
         fig_r = go.Figure()
         fig_r.add_trace(go.Bar(
             x=reg_pri["region"], y=reg_pri["revenue_gbp"],
@@ -648,10 +666,12 @@ else:
         fig_r.add_trace(go.Bar(
             x=reg_cur["region"], y=reg_cur["revenue_gbp"],
             name=str(year), marker_color=COLORS["cur"],
+            text=reg_pct_text, textposition="outside",
+            textfont=dict(size=11),
         ))
         fig_r.update_layout(
             barmode="group", yaxis=dict(tickformat="£,.0f", gridcolor="#2a2a3e"),
-            height=300, margin=dict(t=10, b=30),
+            height=320, margin=dict(t=10, b=30),
             legend=dict(orientation="h", yanchor="bottom", y=1.02),
             plot_bgcolor="#0f1117", paper_bgcolor="#0f1117", font=dict(color="#ccc"),
         )
@@ -662,6 +682,11 @@ else:
         cat_cur = (cur_df_all.groupby("product_type")["revenue_gbp"]
                    .sum().sort_values(ascending=False).head(12))
         cat_pri_ser = pri_df_all.groupby("product_type")["revenue_gbp"].sum()
+        cat_pct_text = [
+            f"{(float(cat_cur.get(pt, 0)) - float(cat_pri_ser.get(pt, 0))) / float(cat_pri_ser.get(pt, 1)) * 100:+.0f}%"
+            if float(cat_pri_ser.get(pt, 0)) > 0 else ""
+            for pt in cat_cur.index[::-1]
+        ]
         fig_c = go.Figure()
         fig_c.add_trace(go.Bar(
             y=cat_cur.index[::-1],
@@ -674,10 +699,12 @@ else:
             x=cat_cur.values[::-1],
             name=str(year), marker_color=COLORS["cur"],
             orientation="h",
+            text=cat_pct_text, textposition="outside",
+            textfont=dict(size=11),
         ))
         fig_c.update_layout(
             barmode="group", xaxis=dict(tickformat="£,.0f", gridcolor="#2a2a3e"),
-            height=300, margin=dict(t=10, b=30),
+            height=320, margin=dict(t=10, b=30),
             legend=dict(orientation="h", yanchor="bottom", y=1.02),
             plot_bgcolor="#0f1117", paper_bgcolor="#0f1117", font=dict(color="#ccc"),
         )
