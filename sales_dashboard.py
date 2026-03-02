@@ -139,8 +139,11 @@ def _build_query(utc_ranges: list, tz_ranges: list) -> str:
         ON o.order_id = li.order_id AND o.store = li.store
       JOIN `lndr-brain.reference.exchange_rates` fx
         ON fx.date = DATE(o.created_at)
-      LEFT JOIN `lndr-brain.shopify_raw.products` p
-        ON li.product_id = p.product_id AND li.store = p.store
+      LEFT JOIN (
+        SELECT product_id, store, MAX(product_type) AS product_type
+        FROM `lndr-brain.shopify_raw.products`
+        GROUP BY product_id, store
+      ) p ON li.product_id = p.product_id AND li.store = p.store
       WHERE o.financial_status != 'voided'
         AND NOT REGEXP_CONTAINS(LOWER(IFNULL(o.tags, '')), r'swap')
         AND NOT (o.source_name = 'shopify_draft_order' AND o.total_price = 0)
