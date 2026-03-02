@@ -422,7 +422,7 @@ if view == "Monthly":
     # ── Title + KPI cards ─────────────────────────────────────────────────────
     st.title(f"Global Gross Revenue — {date(year, month, 1).strftime('%B %Y')}")
 
-    k1, k2, k3, k4 = st.columns(4)
+    k1, k2, k3, k4, k5 = st.columns(5)
     if is_future:
         fc_vs_py = (forecast - pri_full) / pri_full * 100 if pri_full else 0
         k1.metric("Forecast Target",      gbp(forecast) if forecast else "—",
@@ -433,17 +433,18 @@ if view == "Monthly":
         k3.metric(f"{prior} Actual",      gbp(pri_full))
         k4.metric("Prior year daily avg", gbp(pri_full / days_in_month) if pri_full else "—")
     else:
-        k1.metric("MTD Revenue",          gbp(cur_total),
+        k1.metric("Monthly Target",       gbp(forecast) if forecast else "—")
+        k2.metric("MTD Revenue",          gbp(cur_total),
                   delta=pct(yoy_pct) + " YoY", delta_color="normal")
-        k2.metric("vs Forecast",
+        k3.metric("vs Forecast",
                   f"{cur_total/forecast*100:.0f}%" if forecast else "—",
-                  delta=f"target {gbp(forecast)}", delta_color="off")
-        k3.metric("Prior Year (same days)", gbp(pri_comparable))
+                  delta_color="off")
+        k4.metric("Prior Year (same days)", gbp(pri_comparable))
         if is_current and req_daily > 0:
-            k4.metric("Required daily avg", gbp(req_daily),
+            k5.metric("Required daily avg", gbp(req_daily),
                       delta=f"{days_remaining} days remaining", delta_color="off")
         else:
-            k4.metric("Full month YoY",
+            k5.metric("Full month YoY",
                       pct((cur_total - pri_full) / pri_full * 100) if pri_full else "—")
 
     # ── Main line chart ───────────────────────────────────────────────────────
