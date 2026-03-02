@@ -383,6 +383,7 @@ pri_df_all = df[df["year_label"] == prior]
 if view == "Monthly":
     days_in_month  = calendar.monthrange(year, month)[1]
     is_current     = (year == today.year and month == today.month)
+    is_future      = date(year, month, 1) > date(today.year, today.month, 1)
 
     cur_by_day = cur_df_all.groupby("day")["revenue_gbp"].sum()
     pri_by_day = pri_df_all.groupby("day")["revenue_gbp"].sum()
@@ -390,41 +391,61 @@ if view == "Monthly":
     last_data_day  = int(cur_by_day.index.max()) if not cur_by_day.empty else 0
     days_remaining = days_in_month - last_data_day
 
-    cur_total = float(cur_by_day.sum())
+    cur_total  = float(cur_by_day.sum())
+    pri_full   = float(pri_by_day.sum())
+    forecast   = load_forecast(year, month)
+    daily_fc   = forecast / days_in_month if forecast and days_in_month else 0
+
     # Prior year apples-to-apples: only days we have current year data for
     pri_comparable = float(pri_by_day[pri_by_day.index <= last_data_day].sum())
     yoy_pct = (cur_total - pri_comparable) / pri_comparable * 100 if pri_comparable else 0
 
-    forecast    = load_forecast(year, month)
-    needed      = forecast - cur_total
-    req_daily   = needed / days_remaining if days_remaining > 0 and needed > 0 else 0
+    needed    = forecast - cur_total
+    req_daily = needed / days_remaining if days_remaining > 0 and needed > 0 else 0
 
     # ── Title + KPI cards ─────────────────────────────────────────────────────
     st.title(f"Global Gross Revenue — {date(year, month, 1).strftime('%B %Y')}")
 
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric("MTD Revenue",     gbp(cur_total),
-              delta=pct(yoy_pct) + " YoY",
-              delta_color="normal")
-    k2.metric("vs Forecast",
-              f"{cur_total/forecast*100:.0f}%" if forecast else "—",
-              delta=f"target {gbp(forecast)}",
-              delta_color="off")
-    k3.metric("Prior Year (same days)", gbp(pri_comparable))
-    if is_current and req_daily > 0:
-        k4.metric("Required daily avg",   gbp(req_daily),
-                  delta=f"{days_remaining} days remaining",
-                  delta_color="off")
+    if is_future:
+        fc_vs_py = (forecast - pri_full) / pri_full * 100 if pri_full else 0
+        k1.metric("Forecast Target",      gbp(forecast) if forecast else "—",
+                  delta=pct(fc_vs_py) + " vs prior year" if forecast else None,
+                  delta_color="normal")
+        k2.metric("Daily avg needed",     gbp(daily_fc) if daily_fc else "—",
+                  delta=f"over {days_in_month} days", delta_color="off")
+        k3.metric(f"{prior} Actual",      gbp(pri_full))
+        k4.metric("Prior year daily avg", gbp(pri_full / days_in_month) if pri_full else "—")
     else:
-        pri_full = float(pri_by_day.sum())
-        k4.metric("Full month YoY",
-                  pct((cur_total - pri_full) / pri_full * 100) if pri_full else "—")
+        k1.metric("MTD Revenue",          gbp(cur_total),
+                  delta=pct(yoy_pct) + " YoY", delta_color="normal")
+        k2.metric("vs Forecast",
+                  f"{cur_total/forecast*100:.0f}%" if forecast else "—",
+                  delta=f"target {gbp(forecast)}", delta_color="off")
+        k3.metric("Prior Year (same days)", gbp(pri_comparable))
+        if is_current and req_daily > 0:
+            k4.metric("Required daily avg", gbp(req_daily),
+                      delta=f"{days_remaining} days remaining", delta_color="off")
+        else:
+            k4.metric("Full month YoY",
+                      pct((cur_total - pri_full) / pri_full * 100) if pri_full else "—")
 
     # ── Main line chart ───────────────────────────────────────────────────────
     fig = go.Figure()
 
-    # Remaining-days shading
-    if is_current and days_remaining > 0:
+    # Shading
+    if is_future:
+        fig.add_vrect(
+            x0=0.5, x1=days_in_month + 0.5,
+            fillcolor="steelblue", opacity=0.05,
+            layer="below", line_width=0,
+        )
+        fig.add_annotation(
+            x=(days_in_month + 1) / 2, y=0, yref="paper",
+            text="Upcoming", showarrow=False,
+            font=dict(color="steelblue", size=10), yanchor="bottom",
+        )
+    elif is_current and days_remaining > 0:
         fig.add_vrect(
             x0=last_data_day + 0.5, x1=days_in_month + 0.5,
             fillcolor="steelblue", opacity=0.07,
@@ -444,18 +465,21 @@ if view == "Monthly":
         hovertemplate="%{customdata}<extra></extra>",
     ))
 
-    # Current year line
-    cur_x = sorted(cur_by_day.index.tolist())
-    cur_y = [float(cur_by_day.get(d, 0)) for d in cur_x]
-    fig.add_trace(go.Scatter(
-        x=cur_x, y=cur_y,
-        mode="lines+markers",
-        name=f"{date(year, month, 1).strftime('%b %Y')} (to {last_data_day})",
-        line=dict(color=COLORS["cur"], width=2),
-        marker=dict(size=3),
-        customdata=[gbp(v) for v in cur_y],
-        hovertemplate="%{customdata}<extra></extra>",
-    ))
+    # Current year line — only when data exists
+    if not is_future:
+        cur_x = sorted(cur_by_day.index.tolist())
+        cur_y = [float(cur_by_day.get(d, 0)) for d in cur_x]
+        fig.add_trace(go.Scatter(
+            x=cur_x, y=cur_y,
+            mode="lines+markers",
+            name=f"{date(year, month, 1).strftime('%b %Y')} (to {last_data_day})",
+            line=dict(color=COLORS["cur"], width=2),
+            marker=dict(size=3),
+            customdata=[gbp(v) for v in cur_y],
+            hovertemplate="%{customdata}<extra></extra>",
+        ))
+    else:
+        cur_x, cur_y = [], []
 
     # Required daily avg line
     if is_current and req_daily > 0:
@@ -491,12 +515,16 @@ if view == "Monthly":
         )
 
     # Forecast daily target (always shown when forecast exists)
-    if forecast > 0:
-        daily_target = forecast / days_in_month
+    if daily_fc > 0:
+        label = (
+            f"Forecast {gbp(daily_fc)}/day  ({gbp(forecast)}/mo)"
+            if is_future else
+            f"Target {gbp(daily_fc)}/day  ({gbp(forecast)}/mo)"
+        )
         fig.add_hline(
-            y=daily_target,
+            y=daily_fc,
             line_dash="dot", line_color="#ffa500", line_width=1.2, opacity=0.6,
-            annotation_text=f"Target {gbp(daily_target)}/day  ({gbp(forecast)}/mo)",
+            annotation_text=label,
             annotation_position="top right",
             annotation_font=dict(color="#ffa500", size=9),
         )
@@ -515,17 +543,18 @@ if view == "Monthly":
                     bgcolor="rgba(15,17,23,0.85)",
                 )
 
-        for i, (day, label) in enumerate(load_promos_for_month(year, month)):
-            y_val = float(cur_by_day.get(day, 0))
-            if y_val > 0:
-                fig.add_annotation(
-                    x=day, y=y_val,
-                    text=label, showarrow=True,
-                    ax=0, ay=-(35 + 18 * (i % 3)),
-                    font=dict(color=COLORS["cur"], size=9),
-                    arrowcolor=COLORS["cur"], arrowwidth=1,
-                    bgcolor="rgba(15,17,23,0.85)",
-                )
+        if not is_future:
+            for i, (day, label) in enumerate(load_promos_for_month(year, month)):
+                y_val = float(cur_by_day.get(day, 0))
+                if y_val > 0:
+                    fig.add_annotation(
+                        x=day, y=y_val,
+                        text=label, showarrow=True,
+                        ax=0, ay=-(35 + 18 * (i % 3)),
+                        font=dict(color=COLORS["cur"], size=9),
+                        arrowcolor=COLORS["cur"], arrowwidth=1,
+                        bgcolor="rgba(15,17,23,0.85)",
+                    )
 
     fig.update_layout(**_chart_layout(
         f"Daily Revenue — {date(year, month, 1).strftime('%b %Y')} vs "
@@ -544,11 +573,9 @@ if view == "Monthly":
     with col_l:
         st.subheader("By Region")
         reg_cur = cur_df_all.groupby("region")["revenue_gbp"].sum().reset_index()
-        # Only include days up to last_data_day for prior year comparability
-        reg_pri_comp = (
-            pri_df_all[pri_df_all["day"] <= last_data_day]
-            .groupby("region")["revenue_gbp"].sum().reset_index()
-        )
+        # For future months use full prior year; otherwise compare same days
+        pri_days_filter = pri_df_all if is_future else pri_df_all[pri_df_all["day"] <= last_data_day]
+        reg_pri_comp = pri_days_filter.groupby("region")["revenue_gbp"].sum().reset_index()
         reg_pri_map = reg_pri_comp.set_index("region")["revenue_gbp"]
         reg_pct_text = [
             f"{(r - reg_pri_map.get(rgn, 0)) / reg_pri_map.get(rgn, 1) * 100:+.0f}%"
@@ -583,10 +610,7 @@ if view == "Monthly":
         st.subheader("By Category")
         cat_cur = (cur_df_all.groupby("product_type")["revenue_gbp"]
                    .sum().sort_values(ascending=False).head(12))
-        cat_pri_ser = (
-            pri_df_all[pri_df_all["day"] <= last_data_day]
-            .groupby("product_type")["revenue_gbp"].sum()
-        )
+        cat_pri_ser = pri_days_filter.groupby("product_type")["revenue_gbp"].sum()
         cat_pct_text = [
             f"{(float(cat_cur.get(pt, 0)) - float(cat_pri_ser.get(pt, 0))) / float(cat_pri_ser.get(pt, 1)) * 100:+.0f}%"
             if float(cat_pri_ser.get(pt, 0)) > 0 else ""
