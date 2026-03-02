@@ -125,6 +125,7 @@ def _build_query(utc_ranges: list, tz_ranges: list) -> str:
         END AS sale_date,
         {REGION_CASE} AS region,
         COALESCE(NULLIF(TRIM(p.product_type), ''), 'Other') AS product_type,
+        CASE WHEN COALESCE(o.orders_count, 0) <= 1 THEN 'New' ELSE 'Returning' END AS customer_type,
         -- Order total in GBP (same as weekly email)
         o.total_price * CASE o.store
           WHEN 'AU'  THEN 1.0 / fx.aud
@@ -155,10 +156,11 @@ def _build_query(utc_ranges: list, tz_ranges: list) -> str:
       EXTRACT(YEAR  FROM sale_date) AS year_label,
       region,
       product_type,
+      customer_type,
       ROUND(SUM(order_rev_gbp * SAFE_DIVIDE(line_gross, order_gross))) AS revenue_gbp
     FROM pre
     WHERE {tz_clauses}
-    GROUP BY day, month_num, year_label, region, product_type
+    GROUP BY day, month_num, year_label, region, product_type, customer_type
     ORDER BY year_label, month_num, day
     """
 
@@ -234,6 +236,20 @@ def load_forecast(year: int, month: int) -> float:
     """
     rows = list(bq.query(sql).result())
     return float(rows[0].total or 0) if rows and rows[0].total else 0.0
+
+
+@st.cache_data(ttl=1800)
+def load_annual_forecast(year: int) -> dict:
+    """Returns {month: forecast_gbp} for all months with a forecast in year."""
+    bq = get_bq()
+    sql = f"""
+    SELECT forecast_month, SUM(total_gbp) AS total
+    FROM `lndr-brain.reference.monthly_forecast`
+    WHERE forecast_year = {year}
+    GROUP BY forecast_month
+    ORDER BY forecast_month
+    """
+    return {int(r.forecast_month): float(r.total or 0) for r in bq.query(sql).result()}
 
 
 @st.cache_data(ttl=86400)
@@ -337,11 +353,12 @@ with st.sidebar:
     if not cats:
         cats = all_cats
 
+    cust_types = st.multiselect("Customer type", ["New", "Returning"], default=["New", "Returning"])
+    if not cust_types:
+        cust_types = ["New", "Returning"]
+
     st.divider()
     show_promos = st.toggle("Show promos", value=True)
-
-    st.caption("Revenue uses line-item prices. "
-               "Minor variance vs order totals may occur due to order-level discounts.")
 
 
 # ── Load & filter data ────────────────────────────────────────────────────────
@@ -351,7 +368,11 @@ if view == "Monthly":
 else:
     raw = load_annual_data(year)
 
-df = raw[raw["region"].isin(regions) & raw["product_type"].isin(cats)].copy()
+df = raw[
+    raw["region"].isin(regions) &
+    raw["product_type"].isin(cats) &
+    raw["customer_type"].isin(cust_types)
+].copy()
 
 cur_df_all = df[df["year_label"] == year]
 pri_df_all = df[df["year_label"] == prior]
@@ -467,6 +488,17 @@ if view == "Monthly":
             text="Remaining days", showarrow=False,
             font=dict(color="steelblue", size=10),
             yanchor="bottom",
+        )
+
+    # Forecast daily target (always shown when forecast exists)
+    if forecast > 0:
+        daily_target = forecast / days_in_month
+        fig.add_hline(
+            y=daily_target,
+            line_dash="dot", line_color="#ffa500", line_width=1.2, opacity=0.6,
+            annotation_text=f"Target {gbp(daily_target)}/day  ({gbp(forecast)}/mo)",
+            annotation_position="top right",
+            annotation_font=dict(color="#ffa500", size=9),
         )
 
     # Promo annotations
@@ -636,6 +668,21 @@ else:
         customdata=[gbp(v) for v in cur_y],
         hovertemplate="%{customdata}<extra></extra>",
     ))
+
+    # Forecast line
+    annual_fc = load_annual_forecast(year)
+    if annual_fc:
+        fc_x = [MONTH_SHORT[m - 1] for m in sorted(annual_fc)]
+        fc_y = [annual_fc[m] for m in sorted(annual_fc)]
+        fig.add_trace(go.Scatter(
+            x=fc_x, y=fc_y,
+            mode="lines+markers",
+            name="Forecast",
+            line=dict(color="#ffa500", dash="dot", width=1.5),
+            marker=dict(symbol="diamond", size=6),
+            customdata=[gbp(v) for v in fc_y],
+            hovertemplate="%{customdata}<extra></extra>",
+        ))
 
     # Promo indicators (small coloured triangles below x-axis)
     if show_promos:
