@@ -329,7 +329,7 @@ def _chart_layout(title: str, xaxis: dict, height: int = 460) -> dict:
     return dict(
         title=dict(text=title, font=dict(size=14)),
         xaxis=dict(**xaxis),
-        yaxis=dict(tickformat="£,.0f", gridcolor="#2a2a3e"),
+        yaxis=dict(tickprefix="£", tickformat="~s", gridcolor="#2a2a3e"),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         hovermode="x unified",
         height=height,
@@ -633,7 +633,7 @@ if view == "Monthly":
             hovertemplate="%{customdata}<extra></extra>",
         ))
         fig_r.update_layout(
-            barmode="group", yaxis=dict(tickformat="£,.0f", gridcolor="#2a2a3e"),
+            barmode="group", yaxis=dict(tickprefix="£", tickformat="~s", gridcolor="#2a2a3e"),
             height=320, margin=dict(t=10, b=30),
             legend=dict(orientation="h", yanchor="bottom", y=1.02),
             plot_bgcolor="#0f1117", paper_bgcolor="#0f1117",
@@ -672,7 +672,7 @@ if view == "Monthly":
             hovertemplate="%{customdata}<extra></extra>",
         ))
         fig_c.update_layout(
-            barmode="group", xaxis=dict(tickformat="£,.0f", gridcolor="#2a2a3e"),
+            barmode="group", xaxis=dict(tickprefix="£", tickformat="~s", gridcolor="#2a2a3e"),
             height=320, margin=dict(t=10, b=30),
             legend=dict(orientation="h", yanchor="bottom", y=1.02),
             plot_bgcolor="#0f1117", paper_bgcolor="#0f1117",
@@ -804,7 +804,7 @@ else:
             hovertemplate="%{customdata}<extra></extra>",
         ))
         fig_r.update_layout(
-            barmode="group", yaxis=dict(tickformat="£,.0f", gridcolor="#2a2a3e"),
+            barmode="group", yaxis=dict(tickprefix="£", tickformat="~s", gridcolor="#2a2a3e"),
             height=320, margin=dict(t=10, b=30),
             legend=dict(orientation="h", yanchor="bottom", y=1.02),
             plot_bgcolor="#0f1117", paper_bgcolor="#0f1117", font=dict(color="#ccc"),
@@ -842,7 +842,7 @@ else:
             hovertemplate="%{customdata}<extra></extra>",
         ))
         fig_c.update_layout(
-            barmode="group", xaxis=dict(tickformat="£,.0f", gridcolor="#2a2a3e"),
+            barmode="group", xaxis=dict(tickprefix="£", tickformat="~s", gridcolor="#2a2a3e"),
             height=320, margin=dict(t=10, b=30),
             legend=dict(orientation="h", yanchor="bottom", y=1.02),
             plot_bgcolor="#0f1117", paper_bgcolor="#0f1117", font=dict(color="#ccc"),
