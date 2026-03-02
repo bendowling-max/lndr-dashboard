@@ -300,13 +300,6 @@ fig_timeline.update_layout(
     paper_bgcolor="#0f0f1a",
     xaxis=dict(tickangle=-45),
 )
-fig_timeline.add_vline(
-    x=today.strftime("%b %Y"),
-    line_dash="dash",
-    line_color="#94a3b8",
-    annotation_text="Today",
-    annotation_position="top",
-)
 st.plotly_chart(fig_timeline, use_container_width=True)
 
 # ── Vendor & Warehouse breakdowns ────────────────────────────────────────────
