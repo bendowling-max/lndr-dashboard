@@ -416,6 +416,8 @@ if view == "Monthly":
         name=f"{date(prior, month, 1).strftime('%b %Y')}",
         line=dict(color=COLORS["pri"], dash="dash", width=1.5),
         marker=dict(size=3),
+        customdata=[gbp(v) for v in pri_y],
+        hovertemplate="%{customdata}<extra></extra>",
     ))
 
     # Current year line
@@ -427,6 +429,8 @@ if view == "Monthly":
         name=f"{date(year, month, 1).strftime('%b %Y')} (to {last_data_day})",
         line=dict(color=COLORS["cur"], width=2),
         marker=dict(size=3),
+        customdata=[gbp(v) for v in cur_y],
+        hovertemplate="%{customdata}<extra></extra>",
     ))
 
     # Required daily avg line
@@ -438,6 +442,8 @@ if view == "Monthly":
             name=f"Required avg ({gbp(req_daily)}/day)",
             line=dict(color=COLORS["req"], dash="dot", width=2),
             marker=dict(symbol="square", size=4),
+            customdata=[gbp(req_daily)] * len(req_x),
+            hovertemplate="%{customdata}<extra></extra>",
         ))
         mid_x = last_data_day + max(2, days_remaining * 2 // 3)
         all_y = pri_y + cur_y
@@ -518,12 +524,16 @@ if view == "Monthly":
         fig_r.add_trace(go.Bar(
             x=reg_pri_comp["region"], y=reg_pri_comp["revenue_gbp"],
             name=f"{prior} (same days)", marker_color=COLORS["pri"], opacity=0.75,
+            customdata=[gbp(v) for v in reg_pri_comp["revenue_gbp"]],
+            hovertemplate="%{customdata}<extra></extra>",
         ))
         fig_r.add_trace(go.Bar(
             x=reg_cur["region"], y=reg_cur["revenue_gbp"],
             name=str(year), marker_color=COLORS["cur"],
             text=reg_pct_text, textposition="outside",
             textfont=dict(size=11),
+            customdata=[gbp(v) for v in reg_cur["revenue_gbp"]],
+            hovertemplate="%{customdata}<extra></extra>",
         ))
         fig_r.update_layout(
             barmode="group", yaxis=dict(tickformat="£,.0f", gridcolor="#2a2a3e"),
@@ -547,12 +557,15 @@ if view == "Monthly":
             if float(cat_pri_ser.get(pt, 0)) > 0 else ""
             for pt in cat_cur.index[::-1]
         ]
+        cat_pri_vals = [float(cat_pri_ser.get(pt, 0)) for pt in cat_cur.index[::-1]]
         fig_c = go.Figure()
         fig_c.add_trace(go.Bar(
             y=cat_cur.index[::-1],
-            x=[float(cat_pri_ser.get(pt, 0)) for pt in cat_cur.index[::-1]],
+            x=cat_pri_vals,
             name=f"{prior} (same days)", marker_color=COLORS["pri"], opacity=0.75,
             orientation="h",
+            customdata=[gbp(v) for v in cat_pri_vals],
+            hovertemplate="%{customdata}<extra></extra>",
         ))
         fig_c.add_trace(go.Bar(
             y=cat_cur.index[::-1],
@@ -561,6 +574,8 @@ if view == "Monthly":
             orientation="h",
             text=cat_pct_text, textposition="outside",
             textfont=dict(size=11),
+            customdata=[gbp(v) for v in cat_cur.values[::-1]],
+            hovertemplate="%{customdata}<extra></extra>",
         ))
         fig_c.update_layout(
             barmode="group", xaxis=dict(tickformat="£,.0f", gridcolor="#2a2a3e"),
@@ -603,6 +618,8 @@ else:
         name=str(prior),
         line=dict(color=COLORS["pri"], dash="dash", width=1.5),
         marker=dict(size=6),
+        customdata=[gbp(v) for v in pri_y],
+        hovertemplate="%{customdata}<extra></extra>",
     ))
 
     cur_x = [MONTH_SHORT[int(m) - 1] for m in sorted(cur_by_month.index)]
@@ -613,6 +630,8 @@ else:
         name=str(year),
         line=dict(color=COLORS["cur"], width=2),
         marker=dict(size=6),
+        customdata=[gbp(v) for v in cur_y],
+        hovertemplate="%{customdata}<extra></extra>",
     ))
 
     # Promo indicators (small coloured triangles below x-axis)
@@ -662,12 +681,16 @@ else:
         fig_r.add_trace(go.Bar(
             x=reg_pri["region"], y=reg_pri["revenue_gbp"],
             name=str(prior), marker_color=COLORS["pri"], opacity=0.75,
+            customdata=[gbp(v) for v in reg_pri["revenue_gbp"]],
+            hovertemplate="%{customdata}<extra></extra>",
         ))
         fig_r.add_trace(go.Bar(
             x=reg_cur["region"], y=reg_cur["revenue_gbp"],
             name=str(year), marker_color=COLORS["cur"],
             text=reg_pct_text, textposition="outside",
             textfont=dict(size=11),
+            customdata=[gbp(v) for v in reg_cur["revenue_gbp"]],
+            hovertemplate="%{customdata}<extra></extra>",
         ))
         fig_r.update_layout(
             barmode="group", yaxis=dict(tickformat="£,.0f", gridcolor="#2a2a3e"),
@@ -687,12 +710,15 @@ else:
             if float(cat_pri_ser.get(pt, 0)) > 0 else ""
             for pt in cat_cur.index[::-1]
         ]
+        cat_pri_vals_ann = [float(cat_pri_ser.get(pt, 0)) for pt in cat_cur.index[::-1]]
         fig_c = go.Figure()
         fig_c.add_trace(go.Bar(
             y=cat_cur.index[::-1],
-            x=[float(cat_pri_ser.get(pt, 0)) for pt in cat_cur.index[::-1]],
+            x=cat_pri_vals_ann,
             name=str(prior), marker_color=COLORS["pri"], opacity=0.75,
             orientation="h",
+            customdata=[gbp(v) for v in cat_pri_vals_ann],
+            hovertemplate="%{customdata}<extra></extra>",
         ))
         fig_c.add_trace(go.Bar(
             y=cat_cur.index[::-1],
@@ -701,6 +727,8 @@ else:
             orientation="h",
             text=cat_pct_text, textposition="outside",
             textfont=dict(size=11),
+            customdata=[gbp(v) for v in cat_cur.values[::-1]],
+            hovertemplate="%{customdata}<extra></extra>",
         ))
         fig_c.update_layout(
             barmode="group", xaxis=dict(tickformat="£,.0f", gridcolor="#2a2a3e"),
