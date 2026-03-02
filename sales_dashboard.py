@@ -114,7 +114,17 @@ def _build_query(utc_ranges: list, tz_ranges: list) -> str:
     )""" for s, e in tz_ranges)
 
     return f"""
-    WITH pre AS (
+    WITH cust_first AS (
+      -- First order date per customer per store (full history, no date filter)
+      SELECT customer_id, store, MIN(DATE(created_at)) AS first_date
+      FROM `lndr-brain.shopify_raw.orders`
+      WHERE customer_id IS NOT NULL
+        AND financial_status != 'voided'
+        AND NOT REGEXP_CONTAINS(LOWER(IFNULL(tags, '')), r'swap')
+        AND NOT (source_name = 'shopify_draft_order' AND total_price = 0)
+      GROUP BY customer_id, store
+    ),
+    pre AS (
       SELECT
         o.store,
         o.shipping_country,
@@ -125,7 +135,11 @@ def _build_query(utc_ranges: list, tz_ranges: list) -> str:
         END AS sale_date,
         {REGION_CASE} AS region,
         COALESCE(NULLIF(TRIM(p.product_type), ''), 'Other') AS product_type,
-        CASE WHEN COALESCE(o.orders_count, 0) <= 1 THEN 'New' ELSE 'Returning' END AS customer_type,
+        CASE
+          WHEN o.customer_id IS NULL THEN 'Returning'
+          WHEN DATE(o.created_at) = cf.first_date THEN 'New'
+          ELSE 'Returning'
+        END AS customer_type,
         -- Order total in GBP (same as weekly email)
         o.total_price * CASE o.store
           WHEN 'AU'  THEN 1.0 / fx.aud
@@ -145,6 +159,8 @@ def _build_query(utc_ranges: list, tz_ranges: list) -> str:
         FROM `lndr-brain.shopify_raw.products`
         GROUP BY product_id, store
       ) p ON li.product_id = p.product_id AND li.store = p.store
+      LEFT JOIN cust_first cf
+        ON o.customer_id = cf.customer_id AND o.store = cf.store
       WHERE o.financial_status != 'voided'
         AND NOT REGEXP_CONTAINS(LOWER(IFNULL(o.tags, '')), r'swap')
         AND NOT (o.source_name = 'shopify_draft_order' AND o.total_price = 0)
