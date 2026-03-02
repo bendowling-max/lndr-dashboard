@@ -74,14 +74,23 @@ st.set_page_config(
 
 @st.cache_resource
 def get_bq():
-    try:
+    if "gcp_service_account" in st.secrets:
         creds = service_account.Credentials.from_service_account_info(
             st.secrets["gcp_service_account"],
             scopes=["https://www.googleapis.com/auth/bigquery.readonly"],
         )
         return bigquery.Client(credentials=creds, project=BQ_PROJECT)
-    except Exception:
-        return bigquery.Client(project=BQ_PROJECT)   # local ADC fallback
+    else:
+        # Local dev — use Application Default Credentials (gcloud auth)
+        try:
+            return bigquery.Client(project=BQ_PROJECT)
+        except Exception:
+            st.error(
+                "**BigQuery credentials not found.**\n\n"
+                "On Streamlit Cloud: add `[gcp_service_account]` in **Settings → Secrets**.\n\n"
+                "Locally: run `gcloud auth application-default login`."
+            )
+            st.stop()
 
 
 # ── SQL helpers ───────────────────────────────────────────────────────────────
