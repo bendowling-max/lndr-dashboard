@@ -93,7 +93,7 @@ def load_pos():
     )
     SELECT * FROM po_gbp
     """
-    df = bq.query(query).to_dataframe()
+    df = bq.query(query).to_dataframe(create_bqstorage_client=False)
     df["expected_date"] = pd.to_datetime(df["expected_date"])
     df["created_date"]  = pd.to_datetime(df["created_date"])
     df["received_date"] = pd.to_datetime(df["received_date"])
@@ -107,7 +107,7 @@ def load_po_items():
     SELECT po_id, sku, title, qty_ordered, qty_received, qty_remaining, cost_price, total_cost
     FROM `lndr-brain.inventory_planner_raw.purchase_order_items`
     """
-    return bq.query(query).to_dataframe()
+    return bq.query(query).to_dataframe(create_bqstorage_client=False)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
